@@ -61,3 +61,34 @@ Our pipeline is designed to save expensive macOS runner minutes and keep the Tes
 2. **Self-anneal.** Fix errors → update tools → test → update Skill/instructions → system gets stronger.
 3. **Update instructions as you learn.** This file and Skills are living documents. When you discover API constraints, better approaches, common errors, or timing expectations — update the relevant document. But don't overwrite without asking unless explicitly told to.
 4. **Local files are for processing.** Deliverables live in cloud services or on-device where users can access them.
+
+## 7. QA Checklist
+
+After completing any significant build (new screen, feature, BLE integration, backend setup, ML model), generate a `TEST_PLAN.md` in the project root without being asked.
+
+Derive every test case from what was actually built — not from a generic template. Read the relevant code and flows, identify the critical user paths, and write 5–15 concrete device-testable tests.
+
+```markdown
+# Test Plan: [Feature Name]
+
+**Date:** YYYY-MM-DD
+**Built:** [1-sentence summary]
+**Tester:** _______________
+**Device(s):** _______________
+
+## Tests
+
+| # | Action | Expected result | Result | Notes |
+|---|--------|-----------------|--------|-------|
+| 1 | [Concrete action] | [Concrete outcome] | ☐ Pass  ☐ Fail | |
+
+## Overall
+
+☐ PASS  ☐ FAIL
+
+**Blocking issues:**
+```
+
+- Every test must be doable on a physical device
+- Mark **(CRITICAL)** on tests where failure blocks shipping
+- Concrete beats complete: "tap Login → lands on Dashboard in <2s" not "login works"
