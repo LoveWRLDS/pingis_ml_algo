@@ -31,7 +31,7 @@ DATASET = Path("data/processed/dataset.csv")
 MODEL_DIR = Path("data/models")
 
 # Labels to train on. Remove "idle" if you don't have idle samples yet.
-TARGET_LABELS = ["hit", "swing_miss", "idle"]
+TARGET_LABELS = ["hit", "swing_miss"]   # idle kräver ~50 samples — lägg till när du har mer data
 
 
 def load_dataset() -> tuple[np.ndarray, np.ndarray, list[str], LabelEncoder]:
@@ -52,7 +52,7 @@ def load_dataset() -> tuple[np.ndarray, np.ndarray, list[str], LabelEncoder]:
     print(f"\nDataset: {len(df)} rows")
     print(df["label"].value_counts().to_string())
 
-    feature_cols = [c for c in df.columns if c not in ("label", "stroke_type")]
+    feature_cols = [c for c in df.columns if c not in ("label", "stroke_type", "player_name", "handedness")]
     X = df[feature_cols].values.astype(float)
     y_raw = df["label"].values
 
