@@ -77,6 +77,13 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
+    // Short CMake staging dir to avoid Windows 260-char path limit
+    externalNativeBuild {
+        cmake {
+            buildStagingDirectory "C:/tmp/pngcxx"
+        }
+    }
+
     namespace "com.collectorapp"
     defaultConfig {
         applicationId "com.collectorapp"

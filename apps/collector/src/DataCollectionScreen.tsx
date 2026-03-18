@@ -1,18 +1,9 @@
 /**
- * DataCollectionScreen.tsx — Pingis träningsdatainsamlare
+ * DataCollectionScreen.tsx
  *
- * Kopplar upp mot BERG AirHive via BLE, streamer IMU-data i en
- * cirkulär buffer, och sparar märkta events (hit/miss/idle) till fil.
- *
- * Filerna sparas till:
- *   Android: /sdcard/Android/data/com.collectorapp/files/pingis_sessions/
- *
- * Kopiera till laptopen med ADB:
- *   adb pull /sdcard/Android/data/com.collectorapp/files/pingis_sessions/ ./data/raw/
- *
- * Sedan:
- *   python skills/pingis-stroke-detection/scripts/preprocess.py
- *   python skills/pingis-stroke-detection/scripts/train_rf.py
+ * Tar emot en redan ansluten BLE-enhet + kalibrering + spelarinformation.
+ * Streamar IMU-data, låter användaren märka events, och sparar till
+ * /sdcard/Download/pingis_sessions/ (synlig i Filer-appen).
  */
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
@@ -23,15 +14,19 @@ import {
   ScrollView,
   StyleSheet,
   Alert,
-  PermissionsAndroid,
-  Platform,
   StatusBar,
 } from 'react-native';
-import { BleManager } from 'react-native-ble-plx';
 import type { Device, BleError, Characteristic } from 'react-native-ble-plx';
 import RNFS from 'react-native-fs';
+import type {
+  ImuSample,
+  LabeledEvent,
+  PlayerSetup,
+  CalibrationData,
+  SessionFile,
+} from './types';
 
-// ── BLE UUIDs (från sensor-protocol.md) ──────────────────────────────────────
+// ── BLE UUIDs ─────────────────────────────────────────────────────────────────
 
 const SERVICE_UUID   = '07C80000-07C8-07C8-07C8-07C807C807C8';
 const ACCEL_UUID     = '07C80001-07C8-07C8-07C8-07C807C807C8';
@@ -39,78 +34,53 @@ const ACCEL_UUID_ALT = '07C80203-07C8-07C8-07C8-07C807C807C8';
 const GYRO_UUID      = '07C80004-07C8-07C8-07C8-07C807C807C8';
 const MAG_UUID       = '07C80010-07C8-07C8-07C8-07C807C807C8';
 
-// ── Konstanter ────────────────────────────────────────────────────────────────
+const APP_VERSION  = '1.0';
+const BUFFER_MS    = 3000;
+const BEFORE_MS    = 500;
+const AFTER_MS     = 500;
+const SESSION_DIR  = `${RNFS.DownloadDirectoryPath}/pingis_sessions`;
 
-const BUFFER_MS = 3000;
-const BEFORE_MS = 500;
-const AFTER_MS  = 500;
-const SESSION_DIR = `${RNFS.ExternalDirectoryPath ?? RNFS.DocumentDirectoryPath}/pingis_sessions`;
-
-// ── Typer ─────────────────────────────────────────────────────────────────────
-
-interface ImuSample {
-  accel_x: number; accel_y: number; accel_z: number;
-  gyro_x: number;  gyro_y: number;  gyro_z: number;
-  mag_x: number;   mag_y: number;   mag_z: number;
-  ts_ms: number;
-}
-
-interface LabeledEvent {
-  label: 'hit' | 'swing_miss' | 'idle';
-  stroke_type: 'forehand' | 'backhand' | 'unknown';
-  recorded_at: string;
-  samples: ImuSample[];
-}
-
-type StrokeType = 'forehand' | 'backhand';
-type ConnState = 'idle' | 'scanning' | 'connecting' | 'connected' | 'error';
-
-// ── BLE-paketparser (speglar BlePacketParser.kt exakt) ────────────────────────
+// ── Paketparser ───────────────────────────────────────────────────────────────
 
 function parsePacket(
   uuid: string,
   base64Data: string,
 ): { type: 'accel' | 'gyro' | 'mag'; x: number; y: number; z: number } | null {
-  // Avkoda base64 → bytes utan Buffer-polyfill
   const binaryStr = atob(base64Data);
   if (binaryStr.length < 9) return null;
-
   const bytes = new Uint8Array(binaryStr.length);
-  for (let i = 0; i < binaryStr.length; i++) {
-    bytes[i] = binaryStr.charCodeAt(i);
-  }
-
+  for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
   const view = new DataView(bytes.buffer);
-  const x = view.getInt16(0, false); // big-endian
+  const x = view.getInt16(0, false);
   const y = view.getInt16(2, false);
   const z = view.getInt16(4, false);
-
   const u = uuid.toUpperCase();
-  if (u === ACCEL_UUID || u === ACCEL_UUID_ALT) {
-    return { type: 'accel', x, y, z };
-  }
-  if (u === GYRO_UUID) {
-    return { type: 'gyro', x, y, z };
-  }
-  if (u === MAG_UUID) {
-    // Kanonisk transform: invertera + dela på 10 → mikrotesla
-    return { type: 'mag', x: -x / 10, y: -y / 10, z: -z / 10 };
-  }
+  if (u === ACCEL_UUID || u === ACCEL_UUID_ALT) return { type: 'accel', x, y, z };
+  if (u === GYRO_UUID) return { type: 'gyro', x, y, z };
+  if (u === MAG_UUID) return { type: 'mag', x: -x / 10, y: -y / 10, z: -z / 10 };
   return null;
 }
 
+// ── Props ─────────────────────────────────────────────────────────────────────
+
+interface Props {
+  setup: PlayerSetup;
+  calibration: CalibrationData;
+  device: Device;
+  onDone: () => void;
+}
+
+type StrokeType = 'forehand' | 'backhand';
+
 // ── Komponent ─────────────────────────────────────────────────────────────────
 
-const bleManager = new BleManager();
-
-export function DataCollectionScreen() {
-  const [connState, setConnState] = useState<ConnState>('idle');
+export function DataCollectionScreen({ setup, calibration, device, onDone }: Props) {
   const [strokeType, setStrokeType] = useState<StrokeType>('forehand');
   const [events, setEvents] = useState<LabeledEvent[]>([]);
   const [sampleHz, setSampleHz] = useState(0);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [isConnected, setIsConnected] = useState(true);
 
-  const deviceRef = useRef<Device | null>(null);
   const bufferRef = useRef<ImuSample[]>([]);
   const latestRef = useRef({
     accel: { x: 0, y: 0, z: 0 },
@@ -120,28 +90,7 @@ export function DataCollectionScreen() {
   const sampleCountRef = useRef(0);
   const hzTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ── BLE-behörigheter ────────────────────────────────────────────────────────
-
-  const requestPermissions = useCallback(async () => {
-    if (Platform.OS !== 'android') return true;
-    const api = Platform.Version as number;
-    if (api >= 31) {
-      const results = await PermissionsAndroid.requestMultiple([
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-      ]);
-      return Object.values(results).every(
-        r => r === PermissionsAndroid.RESULTS.GRANTED,
-      );
-    }
-    const r = await PermissionsAndroid.request(
-      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-    );
-    return r === PermissionsAndroid.RESULTS.GRANTED;
-  }, []);
-
-  // ── BLE-notifikationshanterare ──────────────────────────────────────────────
+  // ── BLE-notifikation ────────────────────────────────────────────────────────
 
   const handleNotification = useCallback(
     (_err: BleError | null, char: Characteristic | null) => {
@@ -165,7 +114,6 @@ export function DataCollectionScreen() {
       bufferRef.current.push(sample);
       sampleCountRef.current += 1;
 
-      // Trimma buffern
       const cutoff = now - BUFFER_MS;
       let i = 0;
       while (i < bufferRef.current.length && bufferRef.current[i].ts_ms < cutoff) i++;
@@ -174,82 +122,30 @@ export function DataCollectionScreen() {
     [],
   );
 
-  // ── Anslut ──────────────────────────────────────────────────────────────────
+  // ── Starta BLE-prenumerationer på den vidarebefordrade device-instansen ──────
 
-  const connect = useCallback(async () => {
-    if (!(await requestPermissions())) {
-      Alert.alert('Behörighet nekad', 'Bluetooth-behörighet krävs.');
-      return;
+  useEffect(() => {
+    for (const uuid of [ACCEL_UUID, ACCEL_UUID_ALT, GYRO_UUID, MAG_UUID]) {
+      try {
+        device.monitorCharacteristicForService(SERVICE_UUID, uuid, handleNotification);
+      } catch (_) {}
     }
 
-    setConnState('scanning');
-    setFeedback('Letar efter AirHive...');
+    let last = 0;
+    hzTimerRef.current = setInterval(() => {
+      setSampleHz(sampleCountRef.current - last);
+      last = sampleCountRef.current;
+    }, 1000);
 
-    bleManager.startDeviceScan(
-      null,
-      { allowDuplicates: false },
-      async (error, device) => {
-        if (error) {
-          setConnState('error');
-          setFeedback(`Skanningsfel: ${error.message}`);
-          return;
-        }
-        if (!device) return;
+    const unsub = device.onDisconnected(() => setIsConnected(false));
 
-        const name = device.name ?? '';
-        if (
-          !name.toLowerCase().includes('airhive') &&
-          !name.toLowerCase().includes('berg')
-        ) return;
+    return () => {
+      if (hzTimerRef.current) clearInterval(hzTimerRef.current);
+      unsub.remove();
+    };
+  }, [device, handleNotification]);
 
-        bleManager.stopDeviceScan();
-        setConnState('connecting');
-        setFeedback(`Hittade: ${name} — kopplar...`);
-
-        try {
-          const connected = await device.connect();
-          await connected.discoverAllServicesAndCharacteristics();
-          deviceRef.current = connected;
-          setConnState('connected');
-          setFeedback(null);
-
-          for (const uuid of [ACCEL_UUID, ACCEL_UUID_ALT, GYRO_UUID, MAG_UUID]) {
-            try {
-              connected.monitorCharacteristicForService(
-                SERVICE_UUID, uuid, handleNotification,
-              );
-            } catch (_) {}
-          }
-
-          // Hz-räknare
-          let last = 0;
-          hzTimerRef.current = setInterval(() => {
-            setSampleHz(sampleCountRef.current - last);
-            last = sampleCountRef.current;
-          }, 1000);
-
-          connected.onDisconnected(() => {
-            setConnState('idle');
-            setSampleHz(0);
-            if (hzTimerRef.current) clearInterval(hzTimerRef.current);
-          });
-        } catch (e: any) {
-          setConnState('error');
-          setFeedback(`Anslutning misslyckades: ${e.message}`);
-        }
-      },
-    );
-  }, [handleNotification, requestPermissions]);
-
-  const disconnect = useCallback(() => {
-    deviceRef.current?.cancelConnection();
-    bleManager.stopDeviceScan();
-    setConnState('idle');
-    setSampleHz(0);
-    if (hzTimerRef.current) clearInterval(hzTimerRef.current);
-  }, []);
-
-  // ── Märk event ──────────────────────────────────────────────────────────────
+  // ── Event-märkning ──────────────────────────────────────────────────────────
 
   const captureEvent = useCallback(
     (label: LabeledEvent['label']) => {
@@ -262,7 +158,7 @@ export function DataCollectionScreen() {
         );
 
         if (window.length < 10) {
-          setFeedback(`⚠ Bara ${window.length} samples — är sensorn ansluten och streamar?`);
+          setFeedback(`⚠ Bara ${window.length} samples — kontrollera anslutningen`);
           return;
         }
 
@@ -275,9 +171,7 @@ export function DataCollectionScreen() {
 
         setEvents(prev => {
           const next = [...prev, event];
-          setFeedback(
-            `✓ ${label.toUpperCase()} (${event.stroke_type}) — ${window.length} samples`,
-          );
+          setFeedback(`✓ ${label.toUpperCase()} (${event.stroke_type}) — ${window.length} samples`);
           return next;
         });
       }, AFTER_MS + 50);
@@ -304,26 +198,40 @@ export function DataCollectionScreen() {
         n++;
       } while (await RNFS.exists(filePath));
 
-      await RNFS.writeFile(filePath, JSON.stringify(events, null, 2), 'utf8');
+      const sessionData: SessionFile = {
+        session_meta: {
+          player_name: setup.name,
+          handedness: setup.handedness,
+          calibration_accel: calibration.gravity,
+          calibration_gyro_bias: calibration.gyro_bias,
+          session_date: new Date().toISOString(),
+          app_version: APP_VERSION,
+        },
+        events,
+      };
+
+      await RNFS.writeFile(filePath, JSON.stringify(sessionData, null, 2), 'utf8');
+
+      const counts = events.reduce<Record<string, number>>(
+        (acc, e) => ({ ...acc, [e.label]: (acc[e.label] ?? 0) + 1 }),
+        {},
+      );
 
       Alert.alert(
         '✓ Session sparad',
-        `${events.length} events sparade.\n\nFil: ${filePath}\n\nKopiera till laptop:\nadb pull /sdcard/Android/data/com.collectorapp/files/pingis_sessions/ ./data/raw/`,
-        [{ text: 'OK', onPress: () => setEvents([]) }],
+        `${events.length} events sparade\n` +
+        `hit: ${counts.hit ?? 0}  miss: ${counts.swing_miss ?? 0}  idle: ${counts.idle ?? 0}\n\n` +
+        `Fil: Download/pingis_sessions/${filePath.split('/').pop()}\n\n` +
+        `Öppna Filer-appen → Downloads/pingis_sessions/ för att hitta filen.`,
+        [
+          { text: 'Ny session', onPress: onDone },
+          { text: 'Fortsätt spela in', onPress: () => setEvents([]) },
+        ],
       );
     } catch (e: any) {
       Alert.alert('Fel', `Kunde inte spara: ${e.message}`);
     }
-  }, [events]);
-
-  // ── Rensa ───────────────────────────────────────────────────────────────────
-
-  useEffect(() => {
-    return () => {
-      bleManager.destroy();
-      if (hzTimerRef.current) clearInterval(hzTimerRef.current);
-    };
-  }, []);
+  }, [events, setup, calibration, onDone]);
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -332,33 +240,31 @@ export function DataCollectionScreen() {
     {},
   );
 
-  const connLabels: Record<ConnState, string> = {
-    idle:       '○  Frånkopplad',
-    scanning:   '⟳  Skannar...',
-    connecting: '⟳  Kopplar upp...',
-    connected:  `●  Ansluten  ${sampleHz}Hz`,
-    error:      '✕  Fel',
-  };
-
   return (
     <ScrollView style={s.root} contentContainerStyle={s.content}>
       <StatusBar barStyle="light-content" backgroundColor="#0d0d0d" />
-      <Text style={s.title}>Pingis Datainsamling</Text>
 
-      {/* Anslutningsstatus */}
-      <View style={[s.bar, connState === 'connected' ? s.barOn : s.barOff]}>
-        <Text style={s.barTxt}>{connLabels[connState]}</Text>
-        <TouchableOpacity
-          style={s.connBtn}
-          onPress={connState === 'connected' ? disconnect : connect}
-        >
-          <Text style={s.connBtnTxt}>
-            {connState === 'connected' ? 'Koppla från' : 'Anslut'}
+      {/* Header */}
+      <View style={s.header}>
+        <View>
+          <Text style={s.playerName}>{setup.name}</Text>
+          <Text style={s.playerMeta}>
+            {setup.handedness === 'right' ? 'Höger' : 'Vänster'}hand  ·  Kalibrerad ✓
           </Text>
-        </TouchableOpacity>
+        </View>
+        <View style={[s.hzBadge, !isConnected && s.hzBadgeOff]}>
+          <Text style={s.hzTxt}>{isConnected ? `${sampleHz}Hz` : 'Bortkopplad'}</Text>
+        </View>
       </View>
 
-      {/* Feedback-rad */}
+      {/* Varning om bortkopplad */}
+      {!isConnected && (
+        <View style={s.warnBox}>
+          <Text style={s.warnTxt}>⚠ Sensorn kopplades från. Spara din session och anslut igen.</Text>
+        </View>
+      )}
+
+      {/* Feedback */}
       {feedback && <Text style={s.feedbackTxt}>{feedback}</Text>}
 
       {/* Slag-typ */}
@@ -404,10 +310,10 @@ export function DataCollectionScreen() {
         activeOpacity={0.7}
       >
         <Text style={s.bigBtnTxt}>IDLE</Text>
-        <Text style={s.bigBtnSub}>vila / mellan slag (håll stilla 2 sek)</Text>
+        <Text style={s.bigBtnSub}>vila / stå still 2 sekunder</Text>
       </TouchableOpacity>
 
-      {/* Sessions-statistik */}
+      {/* Statistik */}
       <View style={s.statsBox}>
         <Text style={s.statsTitle}>Session — {events.length} events</Text>
         <View style={s.statsRow}>
@@ -416,7 +322,7 @@ export function DataCollectionScreen() {
           <Stat label="IDLE" value={counts.idle ?? 0}       color="#95a5a6" />
         </View>
         {events.length === 0 && (
-          <Text style={s.statsHint}>Mål: 20+ hits + 20+ misses + 20+ idle</Text>
+          <Text style={s.statsHint}>Mål: minst 20 av varje</Text>
         )}
       </View>
 
@@ -428,7 +334,7 @@ export function DataCollectionScreen() {
         <TouchableOpacity
           style={[s.secBtn, s.clearBtn]}
           onPress={() =>
-            Alert.alert('Rensa?', 'Alla osparade events tas bort.', [
+            Alert.alert('Rensa?', 'Alla osparade events raderas.', [
               { text: 'Avbryt' },
               { text: 'Rensa', style: 'destructive', onPress: () => setEvents([]) },
             ])
@@ -438,18 +344,12 @@ export function DataCollectionScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Guide */}
-      <View style={s.guide}>
-        <Text style={s.guideTit}>Hur du spelar in:</Text>
-        <Text style={s.guideLine}>1. Tryck Anslut — appen hittar din AirHive</Text>
-        <Text style={s.guideLine}>2. Välj Forehand eller Backhand</Text>
-        <Text style={s.guideLine}>3. Gör ett slag → tryck HIT vid bollkontakt</Text>
-        <Text style={s.guideLine}>4. Sving utan träff → tryck MISS</Text>
-        <Text style={s.guideLine}>5. Stå still 2 sek → tryck IDLE</Text>
-        <Text style={s.guideLine}>6. Tryck Spara session när du är klar</Text>
-        <Text style={[s.guideLine, { marginTop: 8, color: '#555' }]}>
-          Kopiera till laptop med ADB:{'\n'}
-          adb pull /sdcard/Android/data/{'\n'}com.collectorapp/files/pingis_sessions/ ./data/raw/
+      {/* Fil-info */}
+      <View style={s.fileBox}>
+        <Text style={s.fileTit}>Var sparas filerna?</Text>
+        <Text style={s.fileTxt}>
+          Filer-appen → Downloads → pingis_sessions/{'\n'}
+          Ladda upp därifrån till Google Drive eller skicka via mail.
         </Text>
       </View>
     </ScrollView>
@@ -470,23 +370,25 @@ function Stat({ label, value, color }: { label: string; value: number; color: st
 const s = StyleSheet.create({
   root:       { flex: 1, backgroundColor: '#0d0d0d' },
   content:    { padding: 20, paddingBottom: 50 },
-  title:      { color: '#fff', fontSize: 24, fontWeight: '700', marginBottom: 16 },
 
-  bar:        { flexDirection: 'row', alignItems: 'center', borderRadius: 10, padding: 12, marginBottom: 4 },
-  barOn:      { backgroundColor: '#0d2d1a' },
-  barOff:     { backgroundColor: '#1a1a1a' },
-  barTxt:     { color: '#aaa', fontSize: 13, flex: 1 },
-  connBtn:    { backgroundColor: '#222', borderRadius: 6, paddingHorizontal: 14, paddingVertical: 7 },
-  connBtnTxt: { color: '#ccc', fontSize: 13, fontWeight: '600' },
+  header:     { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 },
+  playerName: { color: '#fff', fontSize: 20, fontWeight: '700' },
+  playerMeta: { color: '#3a3a3a', fontSize: 12, marginTop: 2 },
+  hzBadge:    { backgroundColor: '#0d2d1a', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
+  hzBadgeOff: { backgroundColor: '#2d0d0d' },
+  hzTxt:      { color: '#2ecc71', fontSize: 12, fontWeight: '600' },
 
-  feedbackTxt: { color: '#4a9eff', fontSize: 13, textAlign: 'center', marginVertical: 8 },
+  warnBox:    { backgroundColor: '#2d1a00', borderRadius: 8, padding: 12, marginBottom: 12 },
+  warnTxt:    { color: '#e67e22', fontSize: 13 },
 
-  sectionLabel: { color: '#444', fontSize: 10, letterSpacing: 2, marginTop: 20, marginBottom: 8 },
+  feedbackTxt: { color: '#4a9eff', fontSize: 13, textAlign: 'center', marginBottom: 10 },
+
+  sectionLabel: { color: '#333', fontSize: 10, letterSpacing: 2, marginTop: 18, marginBottom: 8 },
   row:          { flexDirection: 'row', gap: 12 },
 
-  typeBtn:    { flex: 1, padding: 14, borderRadius: 8, borderWidth: 1, borderColor: '#2a2a2a', alignItems: 'center' },
+  typeBtn:    { flex: 1, padding: 14, borderRadius: 8, borderWidth: 1, borderColor: '#1e1e1e', alignItems: 'center' },
   typeBtnOn:  { borderColor: '#4a9eff', backgroundColor: '#0d1f33' },
-  typeTxt:    { color: '#444', fontWeight: '700', fontSize: 13 },
+  typeTxt:    { color: '#333', fontWeight: '700', fontSize: 12 },
   typeTxtOn:  { color: '#4a9eff' },
 
   bigBtn:     { borderRadius: 14, padding: 24, marginBottom: 12, alignItems: 'center' },
@@ -494,22 +396,22 @@ const s = StyleSheet.create({
   missBtn:    { backgroundColor: '#2d0d0d' },
   idleBtn:    { backgroundColor: '#15152a' },
   bigBtnTxt:  { color: '#fff', fontSize: 22, fontWeight: '800', letterSpacing: 3 },
-  bigBtnSub:  { color: '#555', fontSize: 12, marginTop: 5 },
+  bigBtnSub:  { color: '#444', fontSize: 12, marginTop: 5 },
 
-  statsBox:   { backgroundColor: '#141414', borderRadius: 12, padding: 16, marginTop: 8 },
-  statsTitle: { color: '#888', fontWeight: '600', marginBottom: 12 },
+  statsBox:   { backgroundColor: '#111', borderRadius: 12, padding: 16, marginTop: 8 },
+  statsTitle: { color: '#666', fontWeight: '600', marginBottom: 12 },
   statsRow:   { flexDirection: 'row', justifyContent: 'space-around' },
-  statsHint:  { color: '#333', fontSize: 12, fontStyle: 'italic', marginTop: 10, textAlign: 'center' },
+  statsHint:  { color: '#2a2a2a', fontSize: 12, fontStyle: 'italic', marginTop: 10, textAlign: 'center' },
   statItem:   { alignItems: 'center' },
   statValue:  { fontSize: 28, fontWeight: '800' },
-  statLabel:  { color: '#555', fontSize: 11, marginTop: 2 },
+  statLabel:  { color: '#444', fontSize: 11, marginTop: 2 },
 
   secBtn:     { flex: 1, padding: 14, borderRadius: 8, alignItems: 'center', marginTop: 12 },
   saveBtn:    { backgroundColor: '#0d2d0d' },
   clearBtn:   { backgroundColor: '#2d0d0d' },
   secBtnTxt:  { color: '#aaa', fontWeight: '700' },
 
-  guide:      { marginTop: 24, backgroundColor: '#111', borderRadius: 12, padding: 16 },
-  guideTit:   { color: '#555', fontWeight: '700', marginBottom: 10 },
-  guideLine:  { color: '#383838', fontSize: 13, marginBottom: 5 },
+  fileBox:    { marginTop: 20, backgroundColor: '#0d0d0d', borderWidth: 1, borderColor: '#1a1a1a', borderRadius: 10, padding: 14 },
+  fileTit:    { color: '#333', fontWeight: '600', marginBottom: 6 },
+  fileTxt:    { color: '#2a2a2a', fontSize: 12, lineHeight: 18 },
 });

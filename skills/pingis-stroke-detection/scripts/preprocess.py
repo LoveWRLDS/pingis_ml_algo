@@ -102,22 +102,67 @@ def find_event_center(samples: list[dict], event_ts_ms: int) -> int:
     return int(np.argmin(diffs))
 
 
-def load_session(filepath: Path) -> list[dict]:
+def load_session(filepath: Path) -> tuple[list[dict], dict]:
     """
     Load a session file. Supports two formats:
-    1. Array of event objects: [{label, stroke_type, samples: [...]}, ...]
-    2. Single event object: {label, stroke_type, samples: [...]}
+
+    1. New format (app v1.0+):
+       { "session_meta": { "player_name", "handedness", "calibration_accel",
+                           "calibration_gyro_bias", ... },
+         "events": [{label, stroke_type, samples: [...]}, ...] }
+
+    2. Old format (array):
+       [{label, stroke_type, samples: [...]}, ...]
+
+    Returns (events_list, meta_dict).
+    meta_dict has keys: player_name, handedness, calibration_accel, calibration_gyro_bias.
     """
     with open(filepath, "r") as f:
         data = json.load(f)
 
-    if isinstance(data, list):
-        return data
+    empty_meta = {
+        "player_name": "unknown",
+        "handedness": "unknown",
+        "calibration_accel": {"x": 0, "y": 0, "z": 0},
+        "calibration_gyro_bias": {"x": 0, "y": 0, "z": 0},
+    }
+
+    if isinstance(data, dict) and "session_meta" in data:
+        # New format
+        meta = data.get("session_meta", {})
+        return data.get("events", []), {
+            "player_name": meta.get("player_name", "unknown"),
+            "handedness": meta.get("handedness", "unknown"),
+            "calibration_accel": meta.get("calibration_accel", {"x": 0, "y": 0, "z": 0}),
+            "calibration_gyro_bias": meta.get("calibration_gyro_bias", {"x": 0, "y": 0, "z": 0}),
+        }
+    elif isinstance(data, list):
+        # Old format — no metadata
+        return data, empty_meta
     elif isinstance(data, dict):
-        return [data]
+        # Single event object (old)
+        return [data], empty_meta
     else:
         print(f"  Warning: unexpected format in {filepath.name}")
-        return []
+        return [], empty_meta
+
+
+def apply_calibration(samples: list[dict], cal_accel: dict) -> list[dict]:
+    """
+    Subtract gravity baseline from accel channels.
+    Returns new list of dicts with calibrated accel values.
+    """
+    ox, oy, oz = cal_accel.get("x", 0), cal_accel.get("y", 0), cal_accel.get("z", 0)
+    if ox == 0 and oy == 0 and oz == 0:
+        return samples  # No calibration data — return as-is
+    result = []
+    for s in samples:
+        c = dict(s)
+        c["accel_x"] = s.get("accel_x", 0) - ox
+        c["accel_y"] = s.get("accel_y", 0) - oy
+        c["accel_z"] = s.get("accel_z", 0) - oz
+        result.append(c)
+    return result
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -137,20 +182,30 @@ def main():
 
     for filepath in session_files:
         print(f"\nProcessing: {filepath.name}")
-        events = load_session(filepath)
+        events, meta = load_session(filepath)
+
+        player_name = meta["player_name"]
+        handedness = meta["handedness"]
+        cal_accel = meta["calibration_accel"]
+
+        if handedness != "unknown":
+            print(f"  Player: {player_name} ({handedness}-handed)")
 
         for event in events:
             label = event.get("label")
             stroke_type = event.get("stroke_type", "unknown")
-            samples = event.get("samples", [])
+            raw_samples = event.get("samples", [])
 
-            if not label or not samples:
+            if not label or not raw_samples:
                 print(f"  Skipping event: missing label or samples")
                 continue
 
-            if len(samples) < WINDOW_SAMPLES:
-                print(f"  Skipping {label}: only {len(samples)} samples (need {WINDOW_SAMPLES})")
+            if len(raw_samples) < WINDOW_SAMPLES:
+                print(f"  Skipping {label}: only {len(raw_samples)} samples (need {WINDOW_SAMPLES})")
                 continue
+
+            # Apply calibration correction (removes gravity baseline)
+            samples = apply_calibration(raw_samples, cal_accel)
 
             # Use middle of samples as the event center
             center_idx = len(samples) // 2
@@ -163,6 +218,8 @@ def main():
             features = extract_features(window)
             features["label"] = label
             features["stroke_type"] = stroke_type
+            features["player_name"] = player_name
+            features["handedness"] = handedness
             all_rows.append(features)
 
     if not all_rows:
@@ -176,7 +233,8 @@ def main():
     print("\nLabel distribution:")
     print(df["label"].value_counts().to_string())
     print("\nFirst few rows (feature columns only):")
-    feature_cols = [c for c in df.columns if c not in ("label", "stroke_type")]
+    meta_cols = ("label", "stroke_type", "player_name", "handedness")
+    feature_cols = [c for c in df.columns if c not in meta_cols]
     print(df[feature_cols].head(3).to_string())
 
 
