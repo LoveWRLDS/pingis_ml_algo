@@ -38,7 +38,8 @@ const APP_VERSION  = '1.0';
 const BUFFER_MS    = 3000;
 const BEFORE_MS    = 500;
 const AFTER_MS     = 500;
-const SESSION_DIR  = `${RNFS.DownloadDirectoryPath}/pingis_sessions`;
+// ExternalStorageDirectoryPath = /storage/emulated/0 (synlig i Filer-appen)
+const SESSION_DIR  = `${RNFS.ExternalStorageDirectoryPath}/Download/pingis_sessions`;
 
 // ── Paketparser ───────────────────────────────────────────────────────────────
 
@@ -212,6 +213,9 @@ export function DataCollectionScreen({ setup, calibration, device, onDone }: Pro
 
       await RNFS.writeFile(filePath, JSON.stringify(sessionData, null, 2), 'utf8');
 
+      // Triggar Android-mediaskannern → filen syns direkt i Filer-appen
+      try { await RNFS.scanFile(filePath); } catch (_) {}
+
       const counts = events.reduce<Record<string, number>>(
         (acc, e) => ({ ...acc, [e.label]: (acc[e.label] ?? 0) + 1 }),
         {},
@@ -224,7 +228,13 @@ export function DataCollectionScreen({ setup, calibration, device, onDone }: Pro
         `Fil: Download/pingis_sessions/${filePath.split('/').pop()}\n\n` +
         `Öppna Filer-appen → Downloads/pingis_sessions/ för att hitta filen.`,
         [
-          { text: 'Ny session', onPress: onDone },
+          {
+            text: 'Ny session',
+            onPress: () => {
+              try { device.cancelConnection(); } catch (_) {}
+              onDone();
+            },
+          },
           { text: 'Fortsätt spela in', onPress: () => setEvents([]) },
         ],
       );
@@ -329,7 +339,7 @@ export function DataCollectionScreen({ setup, calibration, device, onDone }: Pro
       {/* Spara / Rensa */}
       <View style={s.row}>
         <TouchableOpacity style={[s.secBtn, s.saveBtn]} onPress={saveSession}>
-          <Text style={s.secBtnTxt}>Spara session</Text>
+          <Text style={s.saveBtnTxt}>Spara session</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[s.secBtn, s.clearBtn]}
@@ -340,7 +350,7 @@ export function DataCollectionScreen({ setup, calibration, device, onDone }: Pro
             ])
           }
         >
-          <Text style={s.secBtnTxt}>Rensa</Text>
+          <Text style={s.clearBtnTxt}>Rensa</Text>
         </TouchableOpacity>
       </View>
 
@@ -373,7 +383,7 @@ const s = StyleSheet.create({
 
   header:     { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 },
   playerName: { color: '#fff', fontSize: 20, fontWeight: '700' },
-  playerMeta: { color: '#3a3a3a', fontSize: 12, marginTop: 2 },
+  playerMeta: { color: '#777', fontSize: 12, marginTop: 2 },
   hzBadge:    { backgroundColor: '#0d2d1a', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
   hzBadgeOff: { backgroundColor: '#2d0d0d' },
   hzTxt:      { color: '#2ecc71', fontSize: 12, fontWeight: '600' },
@@ -383,12 +393,12 @@ const s = StyleSheet.create({
 
   feedbackTxt: { color: '#4a9eff', fontSize: 13, textAlign: 'center', marginBottom: 10 },
 
-  sectionLabel: { color: '#333', fontSize: 10, letterSpacing: 2, marginTop: 18, marginBottom: 8 },
+  sectionLabel: { color: '#666', fontSize: 10, letterSpacing: 2, marginTop: 18, marginBottom: 8 },
   row:          { flexDirection: 'row', gap: 12 },
 
   typeBtn:    { flex: 1, padding: 14, borderRadius: 8, borderWidth: 1, borderColor: '#1e1e1e', alignItems: 'center' },
   typeBtnOn:  { borderColor: '#4a9eff', backgroundColor: '#0d1f33' },
-  typeTxt:    { color: '#333', fontWeight: '700', fontSize: 12 },
+  typeTxt:    { color: '#777', fontWeight: '700', fontSize: 12 },
   typeTxtOn:  { color: '#4a9eff' },
 
   bigBtn:     { borderRadius: 14, padding: 24, marginBottom: 12, alignItems: 'center' },
@@ -396,22 +406,23 @@ const s = StyleSheet.create({
   missBtn:    { backgroundColor: '#2d0d0d' },
   idleBtn:    { backgroundColor: '#15152a' },
   bigBtnTxt:  { color: '#fff', fontSize: 22, fontWeight: '800', letterSpacing: 3 },
-  bigBtnSub:  { color: '#444', fontSize: 12, marginTop: 5 },
+  bigBtnSub:  { color: '#777', fontSize: 12, marginTop: 5 },
 
   statsBox:   { backgroundColor: '#111', borderRadius: 12, padding: 16, marginTop: 8 },
-  statsTitle: { color: '#666', fontWeight: '600', marginBottom: 12 },
+  statsTitle: { color: '#aaa', fontWeight: '600', marginBottom: 12 },
   statsRow:   { flexDirection: 'row', justifyContent: 'space-around' },
-  statsHint:  { color: '#2a2a2a', fontSize: 12, fontStyle: 'italic', marginTop: 10, textAlign: 'center' },
+  statsHint:  { color: '#666', fontSize: 12, fontStyle: 'italic', marginTop: 10, textAlign: 'center' },
   statItem:   { alignItems: 'center' },
   statValue:  { fontSize: 28, fontWeight: '800' },
-  statLabel:  { color: '#444', fontSize: 11, marginTop: 2 },
+  statLabel:  { color: '#777', fontSize: 11, marginTop: 2 },
 
   secBtn:     { flex: 1, padding: 14, borderRadius: 8, alignItems: 'center', marginTop: 12 },
   saveBtn:    { backgroundColor: '#0d2d0d' },
   clearBtn:   { backgroundColor: '#2d0d0d' },
-  secBtnTxt:  { color: '#aaa', fontWeight: '700' },
+  saveBtnTxt: { color: '#2ecc71', fontWeight: '700' },
+  clearBtnTxt:{ color: '#e74c3c', fontWeight: '700' },
 
-  fileBox:    { marginTop: 20, backgroundColor: '#0d0d0d', borderWidth: 1, borderColor: '#1a1a1a', borderRadius: 10, padding: 14 },
-  fileTit:    { color: '#333', fontWeight: '600', marginBottom: 6 },
-  fileTxt:    { color: '#2a2a2a', fontSize: 12, lineHeight: 18 },
+  fileBox:    { marginTop: 20, backgroundColor: '#0d0d0d', borderWidth: 1, borderColor: '#222', borderRadius: 10, padding: 14 },
+  fileTit:    { color: '#888', fontWeight: '600', marginBottom: 6 },
+  fileTxt:    { color: '#666', fontSize: 12, lineHeight: 18 },
 });

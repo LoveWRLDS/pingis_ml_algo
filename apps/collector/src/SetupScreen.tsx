@@ -39,7 +39,7 @@ export function SetupScreen({ onDone }: Props) {
           value={name}
           onChangeText={setName}
           placeholder="Ditt namn"
-          placeholderTextColor="#333"
+          placeholderTextColor="#555"
           autoCapitalize="words"
           returnKeyType="done"
         />
@@ -102,15 +102,15 @@ const s = StyleSheet.create({
   root:          { flex: 1, backgroundColor: '#0d0d0d' },
   content:       { flex: 1, padding: 24, justifyContent: 'center' },
   title:         { color: '#fff', fontSize: 32, fontWeight: '800', marginBottom: 4 },
-  subtitle:      { color: '#444', fontSize: 15, marginBottom: 36 },
+  subtitle:      { color: '#777', fontSize: 15, marginBottom: 36 },
 
-  label:         { color: '#444', fontSize: 10, letterSpacing: 2, marginBottom: 8 },
-  helpText:      { color: '#333', fontSize: 12, marginBottom: 10 },
+  label:         { color: '#777', fontSize: 10, letterSpacing: 2, marginBottom: 8 },
+  helpText:      { color: '#888', fontSize: 12, marginBottom: 10 },
 
   input: {
     backgroundColor: '#141414',
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#333',
     borderRadius: 10,
     padding: 16,
     color: '#fff',
@@ -130,12 +130,12 @@ const s = StyleSheet.create({
   },
   handBtnOn:     { borderColor: '#4a9eff', backgroundColor: '#0d1f33' },
   handIcon:      { fontSize: 24, marginBottom: 8 },
-  handBtnTxt:    { color: '#444', fontWeight: '700', fontSize: 12, letterSpacing: 1, marginBottom: 4 },
+  handBtnTxt:    { color: '#777', fontWeight: '700', fontSize: 12, letterSpacing: 1, marginBottom: 4 },
   handBtnTxtOn:  { color: '#4a9eff' },
-  handSub:       { color: '#333', fontSize: 10, textAlign: 'center' },
+  handSub:       { color: '#666', fontSize: 10, textAlign: 'center' },
 
   infoBox:       { backgroundColor: '#111', borderRadius: 10, padding: 14, marginBottom: 28 },
-  infoTxt:       { color: '#444', fontSize: 12, lineHeight: 18 },
+  infoTxt:       { color: '#777', fontSize: 12, lineHeight: 18 },
 
   continueBtn: {
     backgroundColor: '#0d2d0d',
