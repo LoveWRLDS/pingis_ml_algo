@@ -1,1 +1,19 @@
 .claude/
+
+# ML training data - can grow to hundreds of MB
+/data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Model artifacts (keep .tflite in git, exclude large checkpoints)
+*.pkl
+*.h5
+*.ckpt
+!data/models/*.tflite
